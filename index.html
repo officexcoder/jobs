@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <title>Secure Job Tracker</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- NEW: SheetJS for Excel -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
 <style>
 body { margin:0; background:#0f1117; color:#e6e6eb; font-family:system-ui,sans-serif; }
 h1,h2 { text-align:center; }
@@ -27,6 +31,7 @@ th,td { border:1px solid #333; padding:6px; font-size:14px; }
 }
 #lockBox { width:320px; padding:20px; }
 #error { color:#ff6b6b; font-size:14px; min-height:18px; }
+.actions { display:flex; gap:10px; flex-wrap:wrap; }
 </style>
 </head>
 
@@ -38,9 +43,10 @@ th,td { border:1px solid #333; padding:6px; font-size:14px; }
     <input type="password" id="password" placeholder="Master password">
     <button id="unlockBtn">Unlock / Create Vault</button>
     <div id="error"></div>
-    <small>Password is never stored. Don’t forget it.</small>
+    <small>Password is never stored. Lose it = data lost.</small>
   </div>
 </div>
+
 <div class="container" id="app" hidden>
 <h1>Job Applications</h1>
 
@@ -60,8 +66,21 @@ th,td { border:1px solid #333; padding:6px; font-size:14px; }
 </div>
 
 <textarea id="notes" placeholder="Notes / contacts / login hints"></textarea>
+
+<div class="actions">
 <button id="addBtn">Add Application</button>
+
+<!-- existing -->
+<button class="secondary" onclick="exportEncrypted()">Encrypted Export</button>
+
+<!-- NEW -->
+<button class="secondary" onclick="importEncrypted()">Encrypted Import</button>
+<button class="secondary" onclick="exportExcel()">Excel Export</button>
+<button class="secondary" onclick="importExcel()">Excel Import</button>
+
+<button class="secondary" onclick="clearOld()">Clear Old (90+ days)</button>
 <button class="secondary" onclick="location.reload()">Lock</button>
+</div>
 
 <table>
 <thead>
@@ -74,12 +93,15 @@ th,td { border:1px solid #333; padding:6px; font-size:14px; }
 </table>
 </div>
 
+<input type="file" id="fileInput" hidden>
+
 <script>
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 let cryptoKey = null;
 let jobs = [];
 
+/* ===== Crypto ===== */
 async function deriveKey(password) {
   const baseKey = await crypto.subtle.importKey(
     "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]
@@ -93,12 +115,12 @@ async function deriveKey(password) {
   );
 }
 
-async function encryptData(data) {
+async function encryptPayload(payload) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt(
     { name:"AES-GCM", iv },
     cryptoKey,
-    enc.encode(JSON.stringify(data))
+    enc.encode(JSON.stringify(payload))
   );
   return JSON.stringify({
     iv: Array.from(iv),
@@ -106,45 +128,40 @@ async function encryptData(data) {
   });
 }
 
-async function decryptData(payload) {
+async function decryptPayload(payload) {
   const obj = JSON.parse(payload);
-  const iv = new Uint8Array(obj.iv);
-  const data = new Uint8Array(obj.data);
   const decrypted = await crypto.subtle.decrypt(
-    { name:"AES-GCM", iv },
+    { name:"AES-GCM", iv:new Uint8Array(obj.iv) },
     cryptoKey,
-    data
+    new Uint8Array(obj.data)
   );
   return JSON.parse(dec.decode(decrypted));
 }
 
+/* ===== Unlock ===== */
 async function unlock() {
   const pw = password.value;
   error.textContent = "";
-  if (!pw) { error.textContent = "Enter a password."; return; }
+  if (!pw) return error.textContent = "Enter a password.";
 
   try {
     cryptoKey = await deriveKey(pw);
     const stored = localStorage.getItem("jobVault");
-    if (stored) {
-      jobs = await decryptData(stored);
-    } else {
-      jobs = [];
-      await save();
-    }
+    jobs = stored ? await decryptPayload(stored) : [];
+    if (!stored) await save();
     lock.style.display = "none";
     app.hidden = false;
     render();
-  } catch (e) {
+  } catch {
     error.textContent = "Wrong password or unsupported browser.";
-    console.error(e);
   }
 }
 
 async function save() {
-  localStorage.setItem("jobVault", await encryptData(jobs));
+  localStorage.setItem("jobVault", await encryptPayload(jobs));
 }
 
+/* ===== Render ===== */
 function render() {
   list.innerHTML = "";
   const now = new Date();
@@ -164,6 +181,7 @@ function render() {
   });
 }
 
+/* ===== Add Job ===== */
 async function addJob() {
   if (!applied.value) return alert("Select Date Applied");
   const a = new Date(applied.value);
@@ -179,6 +197,69 @@ async function addJob() {
   });
   await save();
   render();
+}
+
+/* ===== Encrypted Export ===== */
+async function exportEncrypted() {
+  const encrypted = await encryptPayload({ exported:new Date().toISOString(), jobs });
+  download(encrypted, `job-archive-${Date.now()}.enc.json`);
+}
+
+/* ===== NEW: Encrypted Import ===== */
+async function importEncrypted() {
+  pickFile(async file => {
+    const payload = await file.text();
+    const data = await decryptPayload(payload);
+    jobs = data.jobs || [];
+    await save();
+    render();
+  });
+}
+
+/* ===== NEW: Excel Export ===== */
+function exportExcel() {
+  const ws = XLSX.utils.json_to_sheet(jobs);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Jobs");
+  XLSX.writeFile(wb, "job-tracker.xlsx");
+}
+
+/* ===== NEW: Excel Import ===== */
+function importExcel() {
+  pickFile(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const wb = XLSX.read(e.target.result, { type:"binary" });
+      jobs = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+      save().then(render);
+    };
+    reader.readAsBinaryString(file);
+  });
+}
+
+/* ===== Clear Old (Encrypted Archive enforced) ===== */
+async function clearOld(days=90) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const old = jobs.filter(j => new Date(j.applied) < cutoff);
+  if (!old.length) return alert("No old applications.");
+  if (!confirm(`Encrypted backup will be saved before deletion.\nProceed?`)) return;
+  await exportEncrypted();
+  jobs = jobs.filter(j => new Date(j.applied) >= cutoff);
+  await save();
+  render();
+}
+
+/* ===== Utils ===== */
+function pickFile(cb) {
+  fileInput.onchange = () => cb(fileInput.files[0]);
+  fileInput.click();
+}
+function download(data, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([data]));
+  a.download = name;
+  a.click();
 }
 
 unlockBtn.onclick = unlock;
