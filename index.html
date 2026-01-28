@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Secure Job Tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { margin:0; background:#0f1117; color:#e6e6eb; font-family:system-ui,sans-serif; }
+h1,h2 { text-align:center; }
+input,select,textarea,button {
+  width:100%; padding:10px; margin:6px 0;
+  background:#1c1f2a; color:#fff;
+  border:1px solid #333; border-radius:6px;
+}
+button { background:#3b6df6; border:none; font-weight:600; }
+button.secondary { background:#555; }
+.container { max-width:1000px; margin:auto; padding:16px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
+table { width:100%; border-collapse:collapse; margin-top:20px; }
+th,td { border:1px solid #333; padding:6px; font-size:14px; }
+.warning { background:#3b2f00; }
+.expired { background:#3b0000; }
+
+#lock {
+  position:fixed; inset:0; background:#000;
+  display:flex; align-items:center; justify-content:center;
+}
+#lockBox { width:320px; padding:20px; }
+#error { color:#ff6b6b; font-size:14px; min-height:18px; }
+</style>
+</head>
+
+<body>
+
+<div id="lock">
+  <div id="lockBox">
+    <h2>🔐 Secure Job Tracker</h2>
+    <input type="password" id="password" placeholder="Master password">
+    <button id="unlockBtn">Unlock / Create Vault</button>
+    <div id="error"></div>
+    <small>Password is never stored. Don’t forget it.</small>
+  </div>
+</div>
+
+<div class="container" id="app" hidden>
+<h1>Job Applications</h1>
+
+<div class="grid">
+<input id="company" placeholder="Company">
+<input id="title" placeholder="Job Title">
+<input id="source" placeholder="Source">
+<input id="resume" placeholder="Resume Version">
+<input type="date" id="applied">
+<input type="number" id="follow" value="7" placeholder="Follow-up days">
+<select id="status">
+<option>Applied</option>
+<option>Interview</option>
+<option>Rejected</option>
+<option>Offer</option>
+</select>
+</div>
+
+<textarea id="notes" placeholder="Notes / contacts / login hints"></textarea>
+<button id="addBtn">Add Application</button>
+<button class="secondary" onclick="location.reload()">Lock</button>
+
+<table>
+<thead>
+<tr>
+<th>Company</th><th>Title</th><th>Status</th>
+<th>Applied</th><th>Follow-up</th><th>Notes</th>
+</tr>
+</thead>
+<tbody id="list"></tbody>
+</table>
+</div>
+
+<script>
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+let cryptoKey = null;
+let jobs = [];
+
+async function deriveKey(password) {
+  const baseKey = await crypto.subtle.importKey(
+    "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name:"PBKDF2", salt:enc.encode("job-tracker-salt"), iterations:150000, hash:"SHA-256" },
+    baseKey,
+    { name:"AES-GCM", length:256 },
+    false,
+    ["encrypt","decrypt"]
+  );
+}
+
+async function encryptData(data) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name:"AES-GCM", iv },
+    cryptoKey,
+    enc.encode(JSON.stringify(data))
+  );
+  return JSON.stringify({
+    iv: Array.from(iv),
+    data: Array.from(new Uint8Array(encrypted))
+  });
+}
+
+async function decryptData(payload) {
+  const obj = JSON.parse(payload);
+  const iv = new Uint8Array(obj.iv);
+  const data = new Uint8Array(obj.data);
+  const decrypted = await crypto.subtle.decrypt(
+    { name:"AES-GCM", iv },
+    cryptoKey,
+    data
+  );
+  return JSON.parse(dec.decode(decrypted));
+}
+
+async function unlock() {
+  const pw = password.value;
+  error.textContent = "";
+  if (!pw) { error.textContent = "Enter a password."; return; }
+
+  try {
+    cryptoKey = await deriveKey(pw);
+    const stored = localStorage.getItem("jobVault");
+    if (stored) {
+      jobs = await decryptData(stored);
+    } else {
+      jobs = [];
+      await save();
+    }
+    lock.style.display = "none";
+    app.hidden = false;
+    render();
+  } catch (e) {
+    error.textContent = "Wrong password or unsupported browser.";
+    console.error(e);
+  }
+}
+
+async function save() {
+  localStorage.setItem("jobVault", await encryptData(jobs));
+}
+
+function render() {
+  list.innerHTML = "";
+  const now = new Date();
+  jobs.forEach(j => {
+    const tr = document.createElement("tr");
+    const fd = new Date(j.follow);
+    if (fd < now) tr.className = "expired";
+    else if ((fd - now) / 86400000 < 3) tr.className = "warning";
+    tr.innerHTML = `
+      <td>${j.company}</td>
+      <td>${j.title}</td>
+      <td>${j.status}</td>
+      <td>${j.applied}</td>
+      <td>${j.follow}</td>
+      <td>${j.notes}</td>`;
+    list.appendChild(tr);
+  });
+}
+
+async function addJob() {
+  if (!applied.value) return alert("Select Date Applied");
+  const a = new Date(applied.value);
+  const f = new Date(a);
+  f.setDate(f.getDate() + Number(follow.value || 7));
+  jobs.push({
+    company:company.value,
+    title:title.value,
+    status:status.value,
+    applied:applied.value,
+    follow:f.toISOString().slice(0,10),
+    notes:notes.value
+  });
+  await save();
+  render();
+}
+
+unlockBtn.onclick = unlock;
+addBtn.onclick = addJob;
+</script>
+
+</body>
+</html>
